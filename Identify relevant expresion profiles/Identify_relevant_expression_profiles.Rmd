@@ -1,0 +1,543 @@
+---
+title: "Identify relevant expression profiles"
+author: "David Badenas"
+date: "`r format(Sys.time(), '%d %b %Y')`"
+output: 
+  BiocStyle::html_document:
+    number_sections: true
+    toc_float: yes
+---
+
+```{r, warning=FALSE, message=FALSE}
+library(ggplot2)
+library(dplyr)
+library(pheatmap)
+library(RColorBrewer)
+library(readr)
+library(matrixStats)
+library(edgeR)
+library(GEOquery)
+library(ggfortify)
+```
+
+# BULK
+
+## Bulk gene expression (RNA-seq)
+
+```{r, warning=FALSE}
+setwd("C:/Users/david/OneDrive/Escritorio/Doctorado/Identify relevant expression profiles/Bulk RNAseq/")
+
+expresion <- read.csv("proc_rnaseq.csv", header = TRUE, row.names = 1)
+meta <- readRDS("meta.rds")
+```
+
+```{r}
+dim(expresion)
+```
+
+### Normal
+
+```{r}
+expresion_imputada <- apply(expresion, 1, function(x) {  #La funcion apply delvuelve una matriz traspuesta
+  x[is.na(x)] <- mean(x, na.rm = TRUE)
+  return(x)
+})
+```
+
+Los valores NA se sustituyen por la media del gen, esto evita que el PCA falle.
+
+```{r}
+pca_res <- prcomp(expresion_imputada, scale. = TRUE)
+
+
+var_explicada <- pca_res$sdev^2 / sum(pca_res$sdev^2) * 100
+
+pca_df <- data.frame(pca_res$x[, 1:2],
+                     Muestra = rownames(pca_res$x))
+meta$Muestra <- meta$record_id
+
+pca_defi <- inner_join(pca_df, meta, by = "Muestra")
+
+ggplot(pca_defi, aes(x = PC1, y = PC2)) +
+  geom_point(aes(color = diagnosis), size = 4, alpha = 0.8) + 
+  xlab(paste0("PC1 (", round(var_explicada[1], 1), "%)")) +
+  ylab(paste0("PC2 (", round(var_explicada[2], 1), "%)")) +
+  ggtitle("Análisis de Componentes Principales (PCA)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+
+```
+
+
+### Con los 1000 genes más variables
+
+Los genes con baja variabilidad son genes housekeeping, esto genes provocan "ruido". Al quedarme solo con los genes más variables, refuerzo las señales biológicas reales que diferencian grupos de pacientes.
+
+Ordena los genes por varianza y selecciona los más variables (los que mejor discriminan entre muestras).
+
+```{r}
+var_genes <- apply(expresion, 1, var, na.rm = TRUE)
+
+top_genes <- names(sort(var_genes, decreasing = TRUE))[1:1000]
+expresion_top <- expresion[top_genes, ]
+```
+
+```{r}
+expresion_top <- t(apply(expresion[top_genes, ], 1, function(x) {
+  x[is.na(x)] <- mean(x, na.rm = TRUE)
+  x
+}))
+expresion_top <- as.data.frame(expresion_top)
+expresion_top <- t(expresion_top)
+
+pca_res <- prcomp(expresion_top, scale. = TRUE)
+var_explicada <- pca_res$sdev^2 / sum(pca_res$sdev^2) * 100
+
+pca_df <- data.frame(pca_res$x[, 1:2], Muestra = rownames(pca_res$x))
+pca_defi <- inner_join(pca_df, meta, by = "Muestra")
+
+ggplot(pca_defi, aes(PC1, PC2, color = diagnosis)) +
+  geom_point(size = 3, alpha = 0.8) +
+  xlab(paste0("PC1 (", round(var_explicada[1], 1), "%)")) +
+  ylab(paste0("PC2 (", round(var_explicada[2], 1), "%)")) +
+  ggtitle("PCA con los 1000 genes más variables") +
+  theme_minimal()
+```
+
+### Aplicando filtrado de los datos
+
+-   Substantial expression --\> Se seleccionan genes cuya expresión máxima ≥ 2, esto elimina los genes con niveles de expresión extremadamente bajos. "Para cada gen mirar si por lo menos en 1 paciente el nivel de expresión es mayor o igual a 2"
+-   High expression --\> Se seleccionan genes con expresión máxima aún mayor, enfocado en los genes más activos. "Para cada gen mirar si por lo menos en 1 paciente el nivel de expresión es mayor o igual a 100"
+
+```{r, warning=FALSE}
+expresion_imputada <- t(apply(expresion, 1, function(x) {
+  x[is.na(x)] <- mean(x, na.rm = TRUE)
+  x
+}))
+
+
+substantial_expression <- expresion_imputada[rowMaxs(as.matrix(expresion_imputada), na.rm = TRUE) >= 2, ]
+high_expression <- expresion_imputada[rowMaxs(as.matrix(expresion_imputada), na.rm = TRUE) >= 100, ]
+
+cat("Dimensiones de substantial_expression:", dim(substantial_expression), "\n")
+cat("Dimensiones de high_expression:", dim(high_expression), "\n")
+#No tenemos genes de expresión máxima
+
+
+pca_substantial_expression <- log2(t(substantial_expression) + 1)
+
+
+pca_substantial_expression[!is.finite(as.matrix(pca_substantial_expression))] <- 0
+
+
+
+pca_substantial <- prcomp(pca_substantial_expression, scale. = TRUE)
+
+
+
+var_substantial <- pca_substantial$sdev^2 / sum(pca_substantial$sdev^2) * 100
+
+
+pca_sub_df <- data.frame(pca_substantial$x[, 1:2], Muestra = rownames(pca_substantial$x))
+
+
+pca_sub_defi <- inner_join(pca_sub_df, meta, by = "Muestra")
+
+
+
+ggplot(pca_sub_defi, aes(PC1, PC2, color = diagnosis)) +
+  geom_point(size = 3, alpha = 0.8) +
+  xlab(paste0("PC1 (", round(var_substantial[1], 1), "%)")) +
+  ylab(paste0("PC2 (", round(var_substantial[2], 1), "%)")) +
+  ggtitle("PCA con genes de expresión sustancial (max ≥ 2)") +
+  theme_minimal()
+```
+
+## Pseudobulk gene expression (Alpha cells)
+
+```{r, warning=FALSE, message=FALSE}
+setwd("C:/Users/david/OneDrive/Escritorio/Doctorado/Identify relevant expression profiles/Pseudobulk RNAseq (Alpha cells)/")
+
+expresion <- readRDS("proc_pbrna_Alpha.rds")
+meta <- readRDS("donor.rds")
+```
+
+```{r}
+expresion <- expresion[, -1]
+```
+
+```{r}
+dim(expresion)
+```
+
+### Normal
+
+```{r}
+expresion_imputada <- apply(expresion, 1, function(x) {
+  x[is.na(x)] <- mean(x, na.rm = TRUE)
+  return(x)
+})
+```
+
+```{r}
+pca_res <- prcomp(expresion_imputada, scale. = TRUE)
+
+
+var_explicada <- pca_res$sdev^2 / sum(pca_res$sdev^2) * 100
+
+pca_df <- data.frame(pca_res$x[, 1:2],
+                     Muestra = rownames(pca_res$x))
+meta$Muestra <- meta$record_id
+
+pca_defi <- inner_join(pca_df, meta, by = "Muestra")
+
+ggplot(pca_defi, aes(x = PC1, y = PC2)) +
+  geom_point(aes(color = diagnosis), size = 4, alpha = 0.8) + 
+  xlab(paste0("PC1 (", round(var_explicada[1], 1), "%)")) +
+  ylab(paste0("PC2 (", round(var_explicada[2], 1), "%)")) +
+  ggtitle("Análisis de Componentes Principales (PCA)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+
+```
+
+### Con los 1000 genes más variables
+
+```{r, error=FALSE}
+var_genes <- apply(expresion, 1, var, na.rm = TRUE)
+top_genes <- order(var_genes, decreasing = TRUE)[1:1000]
+expresion_top <- expresion[top_genes, ]
+```
+
+```{r}
+expresion_top <- t(apply(expresion_top, 1, function(x) {
+  x[is.na(x)] <- mean(x, na.rm = TRUE)
+  x
+}))
+```
+
+```{r}
+expresion_top <- as.data.frame(expresion_top)
+expresion_top <- t(expresion_top)
+```
+
+```{r}
+pca_res <- prcomp(expresion_top, scale. = TRUE)
+var_explicada <- pca_res$sdev^2 / sum(pca_res$sdev^2) * 100
+```
+
+```{r}
+pca_df <- data.frame(pca_res$x[, 1:2], Muestra = rownames(pca_res$x))
+meta$Muestra <- meta$record_id
+pca_defi <- inner_join(pca_df, meta, by = "Muestra")
+```
+
+```{r}
+ggplot(pca_defi, aes(PC1, PC2, color = diagnosis)) +
+  geom_point(size = 3, alpha = 0.8) +
+  xlab(paste0("PC1 (", round(var_explicada[1], 1), "%)")) +
+  ylab(paste0("PC2 (", round(var_explicada[2], 1), "%)")) +
+  ggtitle("PCA con los 1000 genes más variables (Alpha cells)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+```
+
+### Aplicando filtrado de los datos
+
+```{r}
+expresion_imputada <- t(apply(expresion, 1, function(x) {
+  x[is.na(x)] <- mean(x, na.rm = TRUE)
+  x
+}))
+```
+
+```{r}
+substantial_expression <- expresion_imputada[rowMaxs(as.matrix(expresion_imputada), na.rm = TRUE) >= 2, ]
+high_expression <- expresion_imputada[rowMaxs(as.matrix(expresion_imputada), na.rm = TRUE) >= 100, ]
+```
+
+```{r}
+dim(substantial_expression)
+dim(high_expression)
+```
+
+```{r}
+pca_substantial_expression <- log2(t(substantial_expression) + 1)
+pca_substantial_expression[!is.finite(as.matrix(pca_substantial_expression))] <- 0
+
+pca_substantial <- prcomp(pca_substantial_expression, scale. = TRUE)
+var_substantial <- pca_substantial$sdev^2 / sum(pca_substantial$sdev^2) * 100
+```
+
+```{r}
+pca_sub_df <- data.frame(pca_substantial$x[, 1:2], Muestra = rownames(pca_substantial$x))
+meta$Muestra <- meta$record_id
+pca_sub_defi <- inner_join(pca_sub_df, meta, by = "Muestra")
+```
+
+```{r}
+ggplot(pca_sub_defi, aes(PC1, PC2, color = diagnosis)) +
+  geom_point(size = 3, alpha = 0.8) +
+  xlab(paste0("PC1 (", round(var_substantial[1], 1), "%)")) +
+  ylab(paste0("PC2 (", round(var_substantial[2], 1), "%)")) +
+  ggtitle("PCA con genes de expresión sustancial (max ≥ 2) - Alpha cells") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+```
+
+## Pseudobulk gene expression (Alpha cells)
+
+Hay menos de 10 pacientes.
+
+# Single cell
+
+## Single-cell mRNA-regulation analysis reveals cell type-specific mechanisms of type 2 diabetes
+
+### GSE153855
+
+```{r, error=FALSE}
+gseid<-"GSE153855"
+gse<- getGEO(gseid, GSEMatrix=TRUE)[[1]] 
+```
+
+```{r, error=FALSE}
+pheno <- pData(gse)
+dim(pheno)
+```
+
+```{r}
+setwd("C:/Users/david/OneDrive/Escritorio/Doctorado/Identify relevant expression profiles/")
+
+gseSupp <- getGEOSuppFiles(gseid, makeDirectory = TRUE)
+
+# Intuyo que los datos de annotation y count estan ordenados, es decir el primero de annotation es el primero de counts
+annotation <- read.delim("GSE153855/GSE153855_Cell_annotation.txt.gz")
+counts<- read.delim("GSE153855/GSE153855_Expression_counts_HQ_allsamples.txt.gz", header = FALSE)
+dim(counts)
+dim(annotation)
+```
+
+```{r, warning=FALSE}
+colnames(counts)[-1] <- annotation$Donor
+countsM <- as.matrix(counts)
+
+dim(countsM)
+```
+
+```{r}
+keep <- rowSums(countsM > 10) >= 4
+countsF <- countsM[keep,]
+dim(countsF)
+```
+
+Normalización usando TMM (Trimmed Mean of M-values)
+```{r}
+rownames(countsF) <- countsF[, 1]
+countsF_num <- countsF[, -1]
+
+countsF_num <- as.matrix(countsF_num)
+mode(countsF_num) <- "numeric"
+
+dge <- DGEList(counts = countsF_num)
+dge <- calcNormFactors(dge, method = "TMM")
+countsTMM <- cpm(dge, log = TRUE)   
+countsTMMnoLog <- cpm(dge, log = FALSE)
+
+dim(countsTMM)
+```
+
+#### Normal
+
+```{r}
+pca_res <- prcomp(t(countsTMM), scale. = TRUE)
+pca_df <- data.frame(pca_res$x[, 1:2])
+var_explicada <- pca_res$sdev^2 / sum(pca_res$sdev^2) * 100
+pca_df <- data.frame(pca_res$x[,1:2], Muestra = colnames(countsTMM))
+
+```
+
+```{r}
+pca_df$Sample <- rownames(pca_df)
+pca_df$Donor <- gsub("\\..*$", "", pca_df$Sample)
+annotation_clean <- annotation %>%
+  filter(Donor != "")
+nrow(annotation_clean)
+nrow(pca_df)
+
+pca_df$CellType <- annotation_clean$CellType
+pca_df$Disease  <- annotation_clean$Disease
+```
+
+```{r}
+ggplot(pca_df, aes(x = PC1, y = PC2, color = CellType, shape = Disease)) +
+  geom_point(size = 2, alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "PCA - Single-cell expression (GSE153855)",
+    x = paste0("PC1 (", round(summary(pca_res)$importance[2, 1] * 100, 1), "% var)"),
+    y = paste0("PC2 (", round(summary(pca_res)$importance[2, 2] * 100, 1), "% var)")
+  ) +
+  theme(legend.position = "right")
+```
+
+#### Genes mas variables
+
+```{r}
+gene_means <- rowMeans(countsTMMnoLog)
+
+top_genes <- names(sort(gene_means, decreasing = TRUE))[1:300]
+countsTMM_top <- countsTMM[top_genes, ]
+```
+
+```{r}
+pca_res_top <- prcomp(t(countsTMM_top), scale. = TRUE)
+var_explicada_top <- pca_res_top$sdev^2 / sum(pca_res_top$sdev^2) * 100
+
+pca_df_top <- data.frame(pca_res_top$x[,1:2], Muestra = colnames(countsTMM_top))
+
+pca_df_top$CellType <- annotation_clean$CellType
+pca_df_top$Disease  <- annotation_clean$Disease
+```
+
+```{r}
+ggplot(pca_df_top, aes(x = PC1, y = PC2, color = CellType, shape = Disease)) +
+  geom_point(size = 2, alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "PCA - Top genes más expresados",
+    x = paste0("PC1 (", round(summary(pca_res_top)$importance[2,1]*100,1), "% var)"),
+    y = paste0("PC2 (", round(summary(pca_res_top)$importance[2,2]*100,1), "% var)")
+  ) +
+  theme(legend.position = "right")
+```
+
+###GSE214517 
+Estos datos ya están normalizados.
+
+```{r}
+gseid_1<-"GSE214517"
+gse_1<- getGEO(gseid_1, GSEMatrix=TRUE)[[1]] 
+```
+
+```{r}
+pheno <- pData(gse_1)
+dim(pheno)
+```
+
+```{r}
+setwd("C:/Users/david/OneDrive/Escritorio/Doctorado/Identify relevant expression profiles/")
+gseSupp <- getGEOSuppFiles(gseid_1, makeDirectory = TRUE)
+
+counts<- read.delim("GSE214517/GSE214517_rpkms.txt.gz", header = TRUE)
+dim(counts)
+```
+
+```{r}
+colnames(counts)[-1] <- pheno$title
+countsM <- as.matrix(counts)
+
+dim(countsM)
+```
+
+```{r}
+keep <- rowSums(countsM > 10) >= 4
+countsF <- countsM[keep,]
+dim(countsF)
+```
+
+```{r}
+rownames(countsF) <- countsF[, 1]
+countsF_num <- countsF[, -1]
+
+countsF_num <- as.matrix(countsF_num)
+mode(countsF_num) <- "numeric"
+
+counts_log <- log2(countsF_num + 1)
+```
+
+#### Normal
+
+```{r}
+pca_res <- prcomp(t(counts_log), scale. = TRUE)
+pca_df <- data.frame(pca_res$x[, 1:2])
+```
+
+```{r}
+pca_df$title <- rownames(pca_df)
+
+pca_merged <- inner_join(pca_df, pheno, by = "title")
+```
+
+```{r}
+ggplot(pca_merged, aes(x = PC1, y = PC2, color = `disease state:ch1`)) +
+  geom_point(size = 2, alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "PCA - Single-cell expression (GSE153855)",
+    x = paste0("PC1 (", round(summary(pca_res)$importance[2, 1] * 100, 1), "% var)"),
+    y = paste0("PC2 (", round(summary(pca_res)$importance[2, 2] * 100, 1), "% var)")
+  ) +
+  theme(legend.position = "right")
+```
+
+#### Genes mas variables
+
+```{r}
+gene_means <- rowMeans(counts_log)
+top_genes <- names(sort(gene_means, decreasing = TRUE))[1:300]
+counts_log_top <- counts_log[top_genes, ]
+```
+
+```{r}
+pca_res_top <- prcomp(t(counts_log_top), scale. = TRUE)
+
+var_explicada_top <- pca_res_top$sdev^2 / sum(pca_res_top$sdev^2) * 100
+
+pca_df_top <- data.frame(pca_res_top$x[,1:2], Muestra = colnames(counts_log_top))
+
+pca_df_top$Disease <- pca_merged$`disease state:ch1`
+```
+
+```{r}
+ggplot(pca_df_top, aes(x = PC1, y = PC2, color = Disease)) +
+  geom_point(size = 2, alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "PCA - Top genes más expresados",
+    x = paste0("PC1 (", round(summary(pca_res_top)$importance[2,1]*100,1), "% var)"),
+    y = paste0("PC2 (", round(summary(pca_res_top)$importance[2,2]*100,1), "% var)")
+  ) +
+  theme(legend.position = "right")
+```
+
+## Functional, metabolic and transcriptional maturation of human pancreatic islets derived from stem cells
+
+### GSE167880
+
+En los metadatos no aparece si tiene T2D o no, ademas no está la matriz de gene expression.
+
+```{r}
+gseid_2<-"GSE167880"
+gse_2<- getGEO(gseid_2, GSEMatrix=TRUE)[[1]] 
+```
+
+```{r}
+pheno <- pData(gse_2)
+dim(pheno)
+```
